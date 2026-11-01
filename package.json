@@ -1,0 +1,53 @@
+{
+  "name": "electron-overlay-window-next",
+  "version": "0.1.0",
+  "description": "Drop-in replacement for electron-overlay-window that adds native KDE Plasma 6 Wayland overlay support via the KWin compositor",
+  "license": "MIT",
+  "author": "ys-kalyakin",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "check-types": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "format": "prettier . --write"
+  },
+  "keywords": [
+    "electron",
+    "overlay",
+    "game-overlay",
+    "wayland",
+    "kde",
+    "kwin",
+    "plasma"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dbus-next": "^0.10.2",
+    "electron-overlay-window": "4.1.0",
+    "ini": "^7.0.0"
+  },
+  "peerDependencies": {
+    "electron": ">=30.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.20.0",
+    "@types/ini": "^4.1.1",
+    "@types/node": "^22.10.0",
+    "electron": "^44.9.3",
+    "eslint": "^9.20.0",
+    "eslint-config-prettier": "^10.0.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.24.0",
+    "vitest": "^3.0.0"
+  }
+}
