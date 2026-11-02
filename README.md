@@ -43,10 +43,39 @@ import { detectBackend, isWaylandBackend } from "electron-overlay-window-next";
 
 A `--overlay-backend=x11|wayland` command-line flag overrides detection.
 
-## Wayland setup
+## Wayland usage
 
-Initialize the KWin bridge once in the Electron main process, before any
-overlay window attaches:
+Zero-config: on a KDE Wayland session the package initializes and starts its
+KWin bridge under the hood the first time an overlay attaches — the game is
+tracked, the overlay window is mirrored and stacked, and the bridge shuts
+itself down when the app quits:
+
+```ts
+import { OverlayController } from "electron-overlay-window-next";
+
+OverlayController.attachByTitle(overlayWindow, gameTitle);
+```
+
+The overlay title the compositor integration matches (KWin scripts and the
+popup layer rule that floats the overlay above fullscreen games) is derived
+from the attached window's title. If your overlay window changes its own
+title dynamically, pass a stable one via explicit initialization instead.
+
+Compositor hotkey and cursor events are app-level seams that work regardless
+of initialization order:
+
+```ts
+import { onShortcut, onCursor } from "electron-overlay-window-next";
+
+onShortcut((id) => { /* KWin shortcut handling */ });
+onCursor((position) => { /* compositor cursor position */ });
+```
+
+### Explicit initialization (override)
+
+Apps that need a custom logger, scripts directory, DBus name, KWin
+shortcuts, or WM_CLASS-based layer-rule matching initialize the bridge
+themselves; the auto path then stays out of the way:
 
 ```ts
 import { initKWinBridge } from "electron-overlay-window-next";
@@ -60,33 +89,19 @@ const bridge = initKWinBridge(logger, scriptsDir, {
 });
 
 app.on("will-quit", () => {
-  void bridge.stop();
+  void bridge.stop(); // explicit init keeps its own stop wiring
 });
 ```
 
-Then attach as usual — on Wayland the bridge tracks the game, mirrors the
-overlay window, and owns `setIgnoreMouseEvents` toggling during
-activation/focus:
-
-```ts
-import { OverlayController, bindOverlayWindow } from "electron-overlay-window-next";
-
-OverlayController.attachByTitle(overlayWindow, gameTitle);
-bindOverlayWindow(overlayWindow); // no-op on non-Wayland backends
-```
-
-KWin hotkey and cursor events flow through the bridge for app-level seams:
-
-```ts
-import { getKWinBridge } from "electron-overlay-window-next";
-
-getKWinBridge()?.onShortcut((id) => { /* app shortcut handling */ });
-getKWinBridge()?.onCursor((position) => { /* compositor cursor position */ });
-```
+`bridge.start()` stays available and idempotent; `getKWinBridge()` returns
+the singleton whichever path created it.
 
 ## Options reference
 
-`initKWinBridge(logger, scriptsDir, options)`:
+`initKWinBridge(logger, scriptsDir, options)` — all options are optional;
+omitted fields fall back to the auto-init defaults (silent logger, a
+per-process scripts directory under the OS temp dir, a package-owned DBus
+base name, no shortcuts):
 
 | Option | Type | Description |
 | --- | --- | --- |
@@ -96,7 +111,7 @@ getKWinBridge()?.onCursor((position) => { /* compositor cursor position */ });
 | `shortcuts` | `[id, keySequence][]` | KWin shortcuts that emit `shortcut` events |
 | `overlayTitle` | `string` | Title of the overlay `BrowserWindow`, matched by the KWin scripts |
 | `dbusServiceName` | `string` | Base DBus name of the bridge service (`.pid<pid>` is appended per instance) |
-| `windowClass` | `string` | WM_CLASS of the overlay window, used by the popup layer rule |
+| `windowClass` | `string` | WM_CLASS of the overlay window, used by the popup layer rule; when omitted, the rule matches the overlay by title |
 
 ## Requirements (Wayland backend)
 
@@ -112,8 +127,9 @@ Everything exported by `electron-overlay-window` keeps its shape:
 `screenshot`, `events`, `targetBounds`, `targetHasFocus`), `OVERLAY_WINDOW_OPTS`
 (backend-aware: `resizable: true` on Wayland), and the `AttachEvent`,
 `AttachOptions` types. Additional exports: `detectBackend`, `isWaylandBackend`,
-`bindOverlayWindow`, `getKWinBridge`, `initKWinBridge`, and the `KWinBridge`,
-`KWinBridgeOptions`, `Logger`, `ShortcutBinding`, `OverlayBackendKind` types.
+`bindOverlayWindow`, `onShortcut`, `onCursor`, `getKWinBridge`,
+`initKWinBridge`, and the `KWinBridge`, `KWinBridgeOptions`, `Logger`,
+`ShortcutBinding`, `OverlayBackendKind` types.
 
 ## Security
 

@@ -116,6 +116,54 @@ describe("installOverlayLayerRule", () => {
     expect(execFileMock).not.toHaveBeenCalled();
   });
 
+  it("installs a title-matched popup rule when no window class is given", async () => {
+    await installOverlayLayerRule({
+      description: DESCRIPTION,
+      overlayTitle: "My Overlay",
+    });
+    const config = writtenConfig();
+    const sections = Object.keys(config).filter((key) => key !== "General");
+    expect(sections).toHaveLength(1);
+    expect(config[sections[0]]).toMatchObject({
+      Description: DESCRIPTION,
+      title: "My Overlay",
+      titlematch: "1",
+      layer: "popup",
+      layerrule: "2",
+    });
+    expect(config[sections[0]].wmclass).toBeUndefined();
+  });
+
+  it("updates the match in place when re-run with a new title", async () => {
+    await installOverlayLayerRule({
+      description: DESCRIPTION,
+      overlayTitle: "Old Title",
+    });
+    const installed = fsMock.writeFileSync.mock.lastCall![1] as string;
+    vi.clearAllMocks();
+    fsMock.existsSync.mockReturnValue(true);
+    fsMock.readFileSync.mockReturnValue(installed);
+    execFileMock.mockImplementation(
+      (_file: string, _args: string[], cb: (error: null) => void) => cb(null),
+    );
+    await installOverlayLayerRule({
+      description: DESCRIPTION,
+      overlayTitle: "New Title",
+    });
+    const config = writtenConfig();
+    const sections = Object.keys(config).filter((key) => key !== "General");
+    expect(sections).toHaveLength(1);
+    expect(config[sections[0]].title).toBe("New Title");
+    expect(config.General.count).toBe("1");
+  });
+
+  it("rejects when neither a window class nor an overlay title is given", async () => {
+    await expect(
+      installOverlayLayerRule({ description: DESCRIPTION }),
+    ).rejects.toThrow("window class or an overlay title");
+    expect(fsMock.writeFileSync).not.toHaveBeenCalled();
+  });
+
   it("rejects when the KWin reconfigure call fails", async () => {
     execFileMock.mockImplementation(
       (_file: string, _args: string[], cb: (error: Error) => void) =>

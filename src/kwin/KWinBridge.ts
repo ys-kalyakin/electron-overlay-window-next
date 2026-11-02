@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { EventEmitter } from "events";
 import type { BrowserWindow } from "electron";
 import { KWinDBusService, type WindowBounds } from "./DBusService";
@@ -23,18 +24,35 @@ const FOCUS_GAME_SCRIPT_NAME = `${SCRIPT_NAME_PREFIX}-focus-game`;
 const RESTORE_PANELS_SCRIPT_NAME = `${SCRIPT_NAME_PREFIX}-restore-panels`;
 const LAYER_RULE_DESCRIPTION = `${SCRIPT_NAME_PREFIX} - Wayland overlay backend`;
 const DEFAULT_BOUNDS: WindowBounds = { x: 0, y: 0, width: 0, height: 0 };
+const SILENT_LOGGER: Logger = { write: () => undefined };
+/** Auto-init DBus base name; underscores — hyphens are invalid in DBus names. */
+const DEFAULT_DBUS_SERVICE_NAME = "io.github.electron_overlay_window_next.KWin";
+
+/**
+ * Auto-init scripts directory (design D2): per-process, so concurrent
+ * overlay apps never clobber each other's fixed-name generated scripts.
+ */
+function defaultScriptDir(): string {
+  return path.join(tmpdir(), SCRIPT_NAME_PREFIX, String(process.pid));
+}
 
 export type { ShortcutBinding };
 
 export interface KWinBridgeOptions {
-  gameTitle: string;
-  shortcuts: ShortcutBinding[];
+  /** Title of the game window to track; empty until the first attach syncs it. */
+  gameTitle?: string;
+  /** KWin shortcuts that emit shortcut events; none by default. */
+  shortcuts?: ShortcutBinding[];
   /** Overlay BrowserWindow title the KWin scripts match and focus. */
-  overlayTitle: string;
+  overlayTitle?: string;
   /** Base DBus name of the bridge service; the runtime name appends .pid<pid>. */
-  dbusServiceName: string;
-  /** WM_CLASS of the overlay window, used by the popup layer rule. */
-  windowClass: string;
+  dbusServiceName?: string;
+  /**
+   * WM_CLASS of the overlay window, used by the popup layer rule. When
+   * omitted (auto-initialized bridges), the rule matches the overlay window
+   * by its title instead.
+   */
+  windowClass?: string;
 }
 
 /**
@@ -68,11 +86,11 @@ export class KWinBridge extends EventEmitter {
     options: KWinBridgeOptions,
   ) {
     super();
-    this.gameTitle = options.gameTitle;
-    this.shortcuts = options.shortcuts;
-    this.overlayTitle = options.overlayTitle;
-    this.dbusServiceName = options.dbusServiceName;
-    this.windowClass = options.windowClass;
+    this.gameTitle = options.gameTitle ?? "";
+    this.shortcuts = options.shortcuts ?? [];
+    this.overlayTitle = options.overlayTitle ?? "";
+    this.dbusServiceName = options.dbusServiceName ?? DEFAULT_DBUS_SERVICE_NAME;
+    this.windowClass = options.windowClass ?? "";
     this.service = new KWinDBusService(this.dbusServiceName, {
       onAttach: (isFullscreen, bounds) => {
         this.targetBoundsValue = bounds;
@@ -147,7 +165,7 @@ export class KWinBridge extends EventEmitter {
   async start(): Promise<void> {
     if (this.started) return;
     await this.service.start();
-    await this.installLayerRuleSafe();
+    await this.syncLayerRuleSafe();
     await this.loadMainScript();
     this.started = true;
     this.logger.write("info [KWin] bridge started");
@@ -169,13 +187,26 @@ export class KWinBridge extends EventEmitter {
     this.logger.write("info [KWin] bridge stopped");
   }
 
-  /** Floats the overlay above the compositor's fullscreen stacking layer. */
-  private async installLayerRuleSafe(): Promise<void> {
+  /**
+   * Floats the overlay above the compositor's fullscreen stacking layer,
+   * matching by WM_CLASS when a window class is configured (explicit init)
+   * and by the overlay title otherwise (auto mode, design D3). With no
+   * identity known yet — auto mode before the first attach — installation
+   * is deferred: the upsert re-runs once attachByTitle derives the title.
+   */
+  private async syncLayerRuleSafe(): Promise<void> {
     try {
-      await installOverlayLayerRule({
-        description: LAYER_RULE_DESCRIPTION,
-        windowClass: this.windowClass,
-      });
+      if (this.windowClass) {
+        await installOverlayLayerRule({
+          description: LAYER_RULE_DESCRIPTION,
+          windowClass: this.windowClass,
+        });
+      } else if (this.overlayTitle) {
+        await installOverlayLayerRule({
+          description: LAYER_RULE_DESCRIPTION,
+          overlayTitle: this.overlayTitle,
+        });
+      }
     } catch (error) {
       this.logger.write(
         `error [KWin] failed to install the overlay layer rule: ${error}`,
@@ -183,15 +214,26 @@ export class KWinBridge extends EventEmitter {
     }
   }
 
-  /** Regenerates and reloads the script; used when title or hotkeys change. */
+  /** Regenerates and reloads the script; used when titles or hotkeys change. */
   async updateConfig(options: Partial<KWinBridgeOptions>): Promise<void> {
     let reload = false;
+    let ruleUpdate = false;
     if (
       options.gameTitle !== undefined &&
       options.gameTitle !== this.gameTitle
     ) {
       this.gameTitle = options.gameTitle;
       reload = true;
+    }
+    if (
+      options.overlayTitle !== undefined &&
+      options.overlayTitle !== this.overlayTitle
+    ) {
+      this.overlayTitle = options.overlayTitle;
+      reload = true;
+      // the title-matched rule follows the derived overlay title; an
+      // explicitly configured WM_CLASS rule is fixed at init
+      ruleUpdate = !this.windowClass;
     }
     if (options.shortcuts !== undefined) {
       const next = JSON.stringify(options.shortcuts);
@@ -203,6 +245,9 @@ export class KWinBridge extends EventEmitter {
     if (reload && this.started) {
       await this.loadMainScript();
       this.logger.write("info [KWin] script reloaded (config changed)");
+    }
+    if (ruleUpdate && this.started) {
+      await this.syncLayerRuleSafe();
     }
   }
 
@@ -302,4 +347,26 @@ export function initKWinBridge(
     for (const listener of bridgeInitListeners) listener(instance);
   }
   return instance;
+}
+
+/**
+ * Returns the singleton bridge, creating it with the auto-init defaults when
+ * the app did not initialize one explicitly (design D1) and kicking off
+ * start() in the background; failures surface through the console error
+ * channel since no app logger is configured on this path. The facade calls
+ * this wherever the controller surface needs the bridge on Wayland.
+ */
+export function ensureKWinBridge(): KWinBridge {
+  if (!bridge) {
+    const instance = new KWinBridge(SILENT_LOGGER, defaultScriptDir(), {});
+    bridge = instance;
+    for (const listener of bridgeInitListeners) listener(instance);
+    instance.start().catch((error: unknown) => {
+      console.error(
+        "[electron-overlay-window-next] KWin bridge auto-start failed:",
+        error,
+      );
+    });
+  }
+  return bridge;
 }

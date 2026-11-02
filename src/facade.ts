@@ -14,7 +14,12 @@ import {
   isWaylandBackend,
   type OverlayBackendKind,
 } from "./detect";
-import { getKWinBridge, onKWinBridgeInit, type KWinBridge } from "./kwin";
+import {
+  ensureKWinBridge,
+  getKWinBridge,
+  onKWinBridgeInit,
+  type KWinBridge,
+} from "./kwin";
 import type { WindowBounds } from "./kwin/DBusService";
 
 /**
@@ -58,6 +63,41 @@ const DEFAULT_RECT: Rectangle = { x: 0, y: 0, width: 0, height: 0 };
 
 function reportAsyncError(operation: string, error: unknown): void {
   console.error(`[electron-overlay-window-next] ${operation} failed:`, error);
+}
+
+let quitStopHooked = false;
+
+/**
+ * Stops an auto-initialized bridge when the Electron app quits (design D4):
+ * fire-and-forget, no quit-sequencing hijack — leftovers self-heal on the
+ * next run. Registers once per process and only on the auto path; explicitly
+ * initialized bridges keep the app's own stop wiring.
+ */
+function hookAutoQuitStop(bridge: KWinBridge): void {
+  if (quitStopHooked) return;
+  quitStopHooked = true;
+  void import("electron")
+    .then((electron) => {
+      electron.app?.once("will-quit", () => {
+        void bridge
+          .stop()
+          .catch((error: unknown) => reportAsyncError("bridge stop", error));
+      });
+    })
+    .catch(() => undefined); // electron unavailable (tests, non-main-process)
+}
+
+/**
+ * Returns the bridge, creating it with the auto-init defaults when the app
+ * did not initialize one explicitly (design D1). The auto path arms the
+ * quit-time cleanup (design D4).
+ */
+function ensureAutoBridge(): KWinBridge {
+  const existing = getKWinBridge();
+  if (existing) return existing;
+  const created = ensureKWinBridge();
+  hookAutoQuitStop(created);
+  return created;
 }
 
 /**
@@ -122,13 +162,7 @@ class WaylandOverlayController {
   }
 
   private requireBridge(): KWinBridge {
-    const bridge = this.ensureWired();
-    if (!bridge) {
-      throw new Error(
-        "KWin bridge is not initialized; call initKWinBridge() first",
-      );
-    }
-    return bridge;
+    return this.ensureWired() ?? ensureAutoBridge();
   }
 
   get events(): EventEmitter {
@@ -166,10 +200,17 @@ class WaylandOverlayController {
   ): void {
     const bridge = this.requireBridge();
     bridge.bindOverlayWindow(electronWindow ?? undefined);
-    // the KWin script tracks the game by title; keep it in sync with the
-    // requested target (a no-op unless the configured title changed)
+    // the KWin script tracks the game by title and matches/focuses the
+    // overlay window by its title; keep both in sync with the attach request
+    // (no-ops unless the configured values changed). The derived title also
+    // feeds the auto-mode popup layer rule (design D3).
+    const overlayTitle = electronWindow?.getTitle();
     void bridge
-      .updateConfig({ gameTitle: targetWindowTitle })
+      .updateConfig(
+        overlayTitle !== undefined
+          ? { gameTitle: targetWindowTitle, overlayTitle }
+          : { gameTitle: targetWindowTitle },
+      )
       .catch((error) => reportAsyncError("updateConfig", error));
   }
 
@@ -196,12 +237,37 @@ export const OverlayController: OverlayControllerApi =
   createOverlayController(detectBackend());
 
 /**
- * Bind the overlay BrowserWindow to the KWin bridge (Wayland backend). A
- * no-op on every other backend, so callers can invoke it unconditionally
+ * Bind the overlay BrowserWindow to the KWin bridge (Wayland backend),
+ * initializing the bridge under the hood when the app did not (design D1).
+ * A no-op on every other backend, so callers can invoke it unconditionally
  * (design D3/D7).
  */
 export function bindOverlayWindow(window?: BrowserWindow): void {
   if (isWaylandBackend()) {
-    getKWinBridge()?.bindOverlayWindow(window ?? undefined);
+    ensureAutoBridge().bindOverlayWindow(window ?? undefined);
+  }
+}
+
+/**
+ * Subscribe to compositor shortcut events (Wayland backend). Delivered via
+ * the bridge whenever it exists — immediately, or as soon as it is created —
+ * so the seam works regardless of initialization order. Subscribing does not
+ * itself initialize the bridge; a no-op off Wayland.
+ */
+export function onShortcut(listener: (id: string) => void): void {
+  if (isWaylandBackend()) {
+    onKWinBridgeInit((bridge) => bridge.onShortcut(listener));
+  }
+}
+
+/**
+ * Subscribe to compositor cursor position events (Wayland backend). Same
+ * delivery semantics as onShortcut.
+ */
+export function onCursor(
+  listener: (position: { x: number; y: number }) => void,
+): void {
+  if (isWaylandBackend()) {
+    onKWinBridgeInit((bridge) => bridge.onCursor(listener));
   }
 }

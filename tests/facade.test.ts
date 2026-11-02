@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { EventEmitter } from "node:events";
 
 /**
@@ -6,7 +6,7 @@ import { EventEmitter } from "node:events";
  * re-imports src/facade with mocks configured for that backend.
  */
 
-const { x11Opts, holder } = vi.hoisted(() => {
+const { x11Opts, holder, electronAppOnce } = vi.hoisted(() => {
   const x11Opts = {
     fullscreenable: true,
     skipTaskbar: true,
@@ -17,14 +17,40 @@ const { x11Opts, holder } = vi.hoisted(() => {
     hasShadow: true,
     alwaysOnTop: false,
   };
-  // EventEmitter-backed stubs are built lazily inside the mock factories
-  // (vi.hoisted runs before imports, so it cannot construct them itself).
-  const holder: {
-    x11Controller?: Record<string, unknown>;
-    bridgeStub?: EventEmitter;
-  } = {};
-  return { x11Opts, holder };
+  const holder = {
+    x11Controller: undefined as Record<string, unknown> | undefined,
+    bridgeStub: undefined as BridgeStub | undefined,
+    initListeners: [] as Array<(bridge: BridgeStub) => void>,
+    ensureCount: 0,
+  };
+  return { x11Opts, holder, electronAppOnce: vi.fn() };
 });
+
+type BridgeStub = EventEmitter & {
+  targetBounds: { x: number; y: number; width: number; height: number };
+  activateOverlay: Mock;
+  focusGame: Mock;
+  bindOverlayWindow: Mock;
+  updateConfig: Mock;
+  stop: Mock;
+  onShortcut: Mock;
+  onCursor: Mock;
+};
+
+function makeBridgeStub(): BridgeStub {
+  // EventEmitter-backed stub built lazily so vi.fn instances are fresh per
+  // construction (vi.hoisted runs before imports).
+  return Object.assign(new EventEmitter(), {
+    targetBounds: { x: 1, y: 2, width: 3, height: 4 },
+    activateOverlay: vi.fn(async () => {}),
+    focusGame: vi.fn(async () => {}),
+    bindOverlayWindow: vi.fn(),
+    updateConfig: vi.fn(async () => {}),
+    stop: vi.fn(async () => {}),
+    onShortcut: vi.fn(),
+    onCursor: vi.fn(),
+  }) as BridgeStub;
+}
 
 vi.mock("electron-overlay-window", async () => {
   const { EventEmitter } = await import("node:events");
@@ -45,22 +71,25 @@ vi.mock("electron-overlay-window", async () => {
   };
 });
 
-vi.mock("../src/kwin", async () => {
-  const { EventEmitter } = await import("node:events");
-  if (!holder.bridgeStub) {
-    holder.bridgeStub = Object.assign(new EventEmitter(), {
-      targetBounds: { x: 1, y: 2, width: 3, height: 4 },
-      activateOverlay: vi.fn(async () => {}),
-      focusGame: vi.fn(async () => {}),
-      bindOverlayWindow: vi.fn(),
-      updateConfig: vi.fn(async () => {}),
-    });
-  }
-  return {
-    getKWinBridge: vi.fn(() => holder.bridgeStub),
-    onKWinBridgeInit: vi.fn(),
-  };
-});
+vi.mock("electron", () => ({
+  app: { once: electronAppOnce },
+}));
+
+vi.mock("../src/kwin", () => ({
+  getKWinBridge: vi.fn(() => holder.bridgeStub),
+  ensureKWinBridge: vi.fn(() => {
+    holder.ensureCount += 1;
+    if (!holder.bridgeStub) {
+      holder.bridgeStub = makeBridgeStub();
+      for (const listener of holder.initListeners) listener(holder.bridgeStub);
+    }
+    return holder.bridgeStub;
+  }),
+  onKWinBridgeInit: vi.fn((listener: (bridge: BridgeStub) => void) => {
+    holder.initListeners.push(listener);
+    if (holder.bridgeStub) listener(holder.bridgeStub);
+  }),
+}));
 
 const x11Controller = () => holder.x11Controller!;
 const bridgeStub = () => holder.bridgeStub!;
@@ -83,8 +112,13 @@ async function loadFacade(backend: "x11" | "wayland") {
   return await import("../src/facade");
 }
 
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 beforeEach(() => {
   vi.clearAllMocks();
+  holder.bridgeStub = makeBridgeStub();
+  holder.initListeners = [];
+  holder.ensureCount = 0;
 });
 
 describe("OverlayController on x11", () => {
@@ -98,14 +132,18 @@ describe("OverlayController on x11", () => {
   });
 
   it("delegates attachByTitle to the original and never touches the bridge", async () => {
-    const { OverlayController } = await loadFacade("x11");
+    const { OverlayController, bindOverlayWindow, onShortcut } =
+      await loadFacade("x11");
     const window = { id: 1 } as never;
     OverlayController.attachByTitle(window, "Some Game");
+    bindOverlayWindow(window);
+    onShortcut(() => {});
     expect(x11Controller().attachByTitle).toHaveBeenCalledWith(
       window,
       "Some Game",
     );
     expect(bridgeStub().bindOverlayWindow).not.toHaveBeenCalled();
+    expect(holder.ensureCount).toBe(0);
   });
 
   it("bindOverlayWindow is a no-op on non-Wayland", async () => {
@@ -138,12 +176,85 @@ describe("OverlayController on wayland", () => {
 
   it("attachByTitle binds the overlay window and syncs the game title", async () => {
     const { OverlayController } = await loadFacade("wayland");
-    const window = { id: 3 } as never;
+    const window = { id: 3, getTitle: () => undefined } as never;
     OverlayController.attachByTitle(window, "My Game");
     expect(bridgeStub().bindOverlayWindow).toHaveBeenCalledWith(window);
     expect(bridgeStub().updateConfig).toHaveBeenCalledWith({
       gameTitle: "My Game",
     });
+  });
+
+  it("auto-initializes the bridge on attach without explicit init", async () => {
+    holder.bridgeStub = undefined;
+    const { OverlayController } = await loadFacade("wayland");
+    const window = { id: 30, getTitle: () => "My Overlay" } as never;
+    OverlayController.attachByTitle(window, "My Game");
+    expect(holder.ensureCount).toBe(1);
+    expect(bridgeStub().bindOverlayWindow).toHaveBeenCalledWith(window);
+    expect(bridgeStub().updateConfig).toHaveBeenCalledWith({
+      gameTitle: "My Game",
+      overlayTitle: "My Overlay",
+    });
+  });
+
+  it("initializes the bridge when the overlay window is bound before attach", async () => {
+    holder.bridgeStub = undefined;
+    const { bindOverlayWindow } = await loadFacade("wayland");
+    const window = { id: 31 } as never;
+    bindOverlayWindow(window);
+    expect(holder.ensureCount).toBe(1);
+    expect(bridgeStub().bindOverlayWindow).toHaveBeenCalledWith(window);
+  });
+
+  it("keeps an already-initialized bridge untouched by the auto path", async () => {
+    const { OverlayController } = await loadFacade("wayland");
+    OverlayController.activateOverlay();
+    OverlayController.attachByTitle(undefined, "My Game");
+    expect(holder.ensureCount).toBe(0);
+    expect(bridgeStub().activateOverlay).toHaveBeenCalledOnce();
+    expect(bridgeStub().updateConfig).toHaveBeenCalledWith({
+      gameTitle: "My Game",
+    });
+  });
+
+  it("stops an auto-initialized bridge when the Electron app quits", async () => {
+    holder.bridgeStub = undefined;
+    const { OverlayController } = await loadFacade("wayland");
+    OverlayController.attachByTitle(
+      { id: 32, getTitle: () => "Ov" } as never,
+      "Game",
+    );
+    await vi.waitFor(() =>
+      expect(electronAppOnce).toHaveBeenCalledWith(
+        "will-quit",
+        expect.any(Function),
+      ),
+    );
+    const handler = electronAppOnce.mock.calls.find(
+      (call) => call[0] === "will-quit",
+    )![1] as () => Promise<void>;
+    await handler();
+    expect(bridgeStub().stop).toHaveBeenCalledOnce();
+  });
+
+  it("registers the quit hook once even across repeated auto ensures", async () => {
+    holder.bridgeStub = undefined;
+    const { OverlayController, bindOverlayWindow } =
+      await loadFacade("wayland");
+    bindOverlayWindow({ id: 33, getTitle: () => "A" } as never);
+    OverlayController.attachByTitle(
+      { id: 34, getTitle: () => "B" } as never,
+      "Game",
+    );
+    await vi.waitFor(() => expect(electronAppOnce).toHaveBeenCalled());
+    expect(electronAppOnce).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not hook quit for already-initialized bridges", async () => {
+    const { OverlayController } = await loadFacade("wayland");
+    OverlayController.attachByTitle(undefined, "Game");
+    await flush();
+    expect(electronAppOnce).not.toHaveBeenCalled();
   });
 
   it("targetBounds mirrors the bridge's tracked bounds", async () => {
@@ -212,5 +323,38 @@ describe("OverlayController on wayland", () => {
   it("OVERLAY_WINDOW_OPTS force resizable on Wayland", async () => {
     const { OVERLAY_WINDOW_OPTS } = await loadFacade("wayland");
     expect(OVERLAY_WINDOW_OPTS).toEqual({ ...x11Opts, resizable: true });
+  });
+});
+
+describe("compositor seams on wayland", () => {
+  it("holds shortcut subscriptions made before the bridge exists", async () => {
+    holder.bridgeStub = undefined;
+    const { onShortcut } = await loadFacade("wayland");
+    const listener = vi.fn();
+    onShortcut(listener);
+    expect(holder.ensureCount).toBe(0); // subscribing must not initialize
+    const { OverlayController } = await import("../src/facade");
+    OverlayController.attachByTitle(
+      { id: 40, getTitle: () => "O" } as never,
+      "G",
+    );
+    expect(bridgeStub().onShortcut).toHaveBeenCalledWith(listener);
+  });
+
+  it("delivers cursor subscriptions made after init immediately", async () => {
+    const { onCursor } = await loadFacade("wayland");
+    const listener = vi.fn();
+    onCursor(listener);
+    expect(bridgeStub().onCursor).toHaveBeenCalledWith(listener);
+    expect(holder.ensureCount).toBe(0);
+  });
+
+  it("are no-ops off Wayland", async () => {
+    const { onShortcut, onCursor } = await loadFacade("x11");
+    const listener = vi.fn();
+    onShortcut(listener);
+    onCursor(listener);
+    expect(bridgeStub().onShortcut).not.toHaveBeenCalled();
+    expect(bridgeStub().onCursor).not.toHaveBeenCalled();
   });
 });

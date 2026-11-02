@@ -13,7 +13,13 @@ export interface OverlayLayerRuleOptions {
   /** Identifies the package's rule in kwinrulesrc; also the removal marker. */
   description: string;
   /** WM_CLASS of the overlay window the rule pins to the popup layer. */
-  windowClass: string;
+  windowClass?: string;
+  /**
+   * Exact title of the overlay window. Used instead of WM_CLASS when no
+   * window class is configured: auto-initialized bridges derive the overlay
+   * title from the attached window and match the rule by it.
+   */
+  overlayTitle?: string;
 }
 
 /**
@@ -22,18 +28,28 @@ export interface OverlayLayerRuleOptions {
  * window rule that pins the OVERLAY window to the "popup" layer (measured
  * as layer 6, above fullscreen), leaving the game's own stacking untouched
  * so panels don't float above it. Only rules with the given Description
- * marker are managed; other user rules are preserved.
+ * marker are managed; other user rules are preserved. The rule matches by
+ * exact WM_CLASS when a window class is given, otherwise by exact title.
  */
 export async function installOverlayLayerRule(
   options: OverlayLayerRuleOptions,
 ): Promise<void> {
+  const match: Record<string, string> | undefined = options.windowClass
+    ? { wmclass: options.windowClass, wmclassmatch: "1" }
+    : options.overlayTitle
+      ? { title: options.overlayTitle, titlematch: "1" }
+      : undefined;
+  if (!match) {
+    throw new Error(
+      "The overlay layer rule needs a window class or an overlay title",
+    );
+  }
   await updateRulesFile((config) => {
     const existing = findOwnRule(config, options.description);
     const uuid = existing ?? randomUUID();
     config[uuid] = {
       Description: options.description,
-      wmclass: options.windowClass,
-      wmclassmatch: "1",
+      ...match,
       types: "1",
       layer: "popup",
       layerrule: "2",
