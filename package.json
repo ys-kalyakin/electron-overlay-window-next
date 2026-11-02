@@ -4,6 +4,14 @@
   "description": "Drop-in replacement for electron-overlay-window that adds native KDE Plasma 6 Wayland overlay support via the KWin compositor",
   "license": "MIT",
   "author": "ys-kalyakin",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ys-kalyakin/electron-overlay-window-next.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ys-kalyakin/electron-overlay-window-next/issues"
+  },
+  "homepage": "https://github.com/ys-kalyakin/electron-overlay-window-next#readme",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -16,7 +24,8 @@
     "check-types": "tsc --noEmit",
     "test": "vitest run",
     "lint": "eslint .",
-    "format": "prettier . --write"
+    "format": "prettier . --write",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "electron",
