@@ -148,5 +148,6 @@ vite.config.ts.timestamp-*
 # Turbo Repo
 .turbo
 
-# Tool-local state (Mimosa security scanner)
+# Tool-local state (Mimosa security scanner, ZCode agent tooling)
 .mimosa/
+.zcode/

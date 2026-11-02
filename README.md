@@ -115,6 +115,13 @@ Everything exported by `electron-overlay-window` keeps its shape:
 `bindOverlayWindow`, `getKWinBridge`, `initKWinBridge`, and the `KWinBridge`,
 `KWinBridgeOptions`, `Logger`, `ShortcutBinding`, `OverlayBackendKind` types.
 
+## Security
+
+Generated KWin scripts are written only inside the configured scripts
+directory: `KWinBridge.writeScript` resolves the target path and rejects
+any path that would escape it. Behavior for the package's internal fixed
+file names is unchanged.
+
 ## Development
 
 ```sh
