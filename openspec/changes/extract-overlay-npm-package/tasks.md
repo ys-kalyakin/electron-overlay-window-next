@@ -6,7 +6,7 @@ Groups 1–3 are performed in the **new package repository** (`electron-overlay-
 
 - [x] 1.1 Create the repo with `package.json` (name `electron-overlay-window-next`, CJS `main` + `types`, MIT), strict `tsconfig`, eslint + prettier, git init; verify `npx tsc --noEmit` passes on the stub `src/index.ts`
 - [x] 1.2 Add dependencies `electron-overlay-window@4.1.0` (pinned exact) and `dbus-next`, `electron` as peerDependency; verify `npm i` resolves and the lockfile is committed
-- [ ] 1.3 Add GitHub Actions CI (lint, typecheck, test, build on ubuntu); verify the workflow is green on the first push
+- [x] 1.3 Add GitHub Actions CI (lint, typecheck, test, build on ubuntu); verify the workflow is green on the first push
 
 ## 2. Package — port the KWin backend (design D2–D6)
 
